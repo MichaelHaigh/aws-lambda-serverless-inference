@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create VPC, Subnets, FSx for NetApp ONTAP, and EC2.
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access into the EC2 with mounted Access Point
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.128.0/18
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.192.0/18
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.0.0.0/18
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.0.64.0/18
+  FSxStorageCapacity:
+    Description: The storage capacity of the FSx for NetApp ONTAP file system (in GiB)
+    Type: Number
+    Default: 4096
+  FSxThroughputCapacity:
+    Description: The throughput capacity of the FSx for ONTAP file system (in MBps)
+    Type: Number
+    Default: 3072
+  FSxVolumeSize:
+    Description: The FSx volume size for the EC2 Instance (in MB)
+    Type: Number
+    Default: 24576
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      CidrBlock: !Ref VpcCIDR
+      Tags:
+        - Key: Application
+          Value:
+            Ref: AWS::StackId
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Application
+          Value:
+            Ref: AWS::StackName
+        - Key: Network
+          Value: Public
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC
+      InternetGatewayId:
+        Ref: InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-az-a"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-az-b"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-az-a"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-az-b"
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-subnet-rt"
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-rt-1"
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-rt-2"
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Ref: VPC
+      GroupName: !Sub "${AWS::StackName}-ec2-sg"
+      GroupDescription: Enable SSH access via port 22
+      SecurityGroupIngress:
+        - IpProtocol: "-1"
+          CidrIp: !Ref VpcCIDR
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 0.0.0.0/0
+
+  FSxSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: FSx ONTAP Security Group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: "-1"
+          CidrIp: !Ref VpcCIDR
+
+  FsxAdminPassword:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Description: FSx ONTAP Admin (fsxadmin) Password
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"fsxadmin"}'
+        GenerateStringKey: password
+        PasswordLength: 16
+      Name: !Sub "${AWS::StackName}-fsxadmin"
+
+  FsxSvmPassword:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Description: FSx SVM Admin (vsadmin) Password
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"vsadmin"}'
+        GenerateStringKey: password
+        PasswordLength: 16
+      Name: !Sub "${AWS::StackName}-vsadmin"
+
+  FSxONTAP:
+    Type: "AWS::FSx::FileSystem"
+    DependsOn: FsxAdminPassword
+    Properties:
+      FileSystemType: ONTAP
+      OntapConfiguration:
+        DeploymentType: MULTI_AZ_2
+        FsxAdminPassword: !Join
+          - ""
+          - - "{{resolve:secretsmanager:"
+            - !Ref "AWS::StackName"
+            - "-fsxadmin:SecretString:password}}"
+        PreferredSubnetId: !Ref PrivateSubnet1
+        RouteTableIds:
+          [
+            !Ref PublicRouteTable,
+            !Ref PrivateRouteTable1,
+            !Ref PrivateRouteTable2,
+          ]
+        ThroughputCapacity: !Ref FSxThroughputCapacity
+      SecurityGroupIds:
+        - !Ref FSxSecurityGroup
+      StorageCapacity: !Ref FSxStorageCapacity
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${AWS::StackName}-fsx-netapp"
+
+  FSxSVM:
+    Type: "AWS::FSx::StorageVirtualMachine"
+    DependsOn: FsxSvmPassword
+    Properties:
+      FileSystemId: !Ref FSxONTAP
+      Name: SVM1
+      SvmAdminPassword: !Join
+        - ""
+        - - "{{resolve:secretsmanager:"
+          - !Ref "AWS::StackName"
+          - "-vsadmin:SecretString:password}}"
+
+  FSxVolume:
+    Type: "AWS::FSx::Volume"
+    Properties:
+      Name: !Join ["_", !Split ["-", !Sub "${AWS::StackName}-fsx-volume"]]
+      OntapConfiguration:
+        JunctionPath: !Sub "/${AWS::StackName}-vol"
+        SecurityStyle: UNIX
+        SizeInMegabytes: !Ref FSxVolumeSize
+        StorageEfficiencyEnabled: "True"
+        StorageVirtualMachineId: !Ref FSxSVM
+      VolumeType: ONTAP
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: c5.large
+      ImageId: !FindInMap ["Region2AMI", !Ref "AWS::Region", "AMI"]
+      KeyName: !Ref "KeyName"
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-xgboost-inference"
+
+Outputs:
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !Join [",", [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [",", [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+  FileSystem:
+    Description: A reference to the created FSx for NetApp ONTAP
+    Value: !Ref FSxONTAP
+  SVM:
+    Description: A reference to the created FSx SVM
+    Value: !Ref FSxSVM
+  EC2InstanceIP:
+    Description: The public IP of the EC2 Instance
+    Value: !GetAtt [EC2Instance, PublicIp]
+  MountCommand:
+    Description: The EC2 instance command to mount the FSx Volume
+    Value: !Sub "sudo mount -t nfs ${FSxSVM}.${FSxONTAP}.fsx.${AWS::Region}.amazonaws.com:/${AWS::StackName}-vol fsx"
+
+Mappings:
+  Region2AMI:
+    ap-south-1:
+      AMI: ami-078264b8ba71bc45e
+    eu-north-1:
+      AMI: ami-097c5c21a18dc59ea
+    eu-west-3:
+      AMI: ami-0a3598a00eff32f66
+    eu-west-2:
+      AMI: ami-0b4c7755cdf0d9219
+    eu-west-1:
+      AMI: ami-054a53dca63de757b
+    ap-northeast-3:
+      AMI: ami-022b677fdccc634eb
+    ap-northeast-2:
+      AMI: ami-0e18fe6ecdad223e5
+    ap-northeast-1:
+      AMI: ami-0ef29ab52ff72213b
+    ca-central-1:
+      AMI: ami-0d9c7bbbda4b78ffd
+    sa-east-1:
+      AMI: ami-0fd8b11b89c97edaf
+    ap-southeast-1:
+      AMI: ami-0ad522a4a529e7aa8
+    ap-southeast-2:
+      AMI: ami-0cf70e1d861e1dfb8
+    eu-central-1:
+      AMI: ami-0592c673f0b1e7665
+    us-east-1:
+      AMI: ami-0fff1b9a61dec8a5f
+    us-east-2:
+      AMI: ami-09da212cf18033880
+    us-west-1:
+      AMI: ami-09b2477d43bc5d0ac
+    us-west-2:
+      AMI: ami-0d081196e3df05f4d
